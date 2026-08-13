@@ -1,2 +1,16 @@
 node_modules/
 *.tgz
+
+# boilerplate and marketing material
+CHANGELOG.md
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+SECURITY.md
+.verdent/
+assets/
+website/
+icon.png
+icon.svg
+
+# archives
+*.zip
