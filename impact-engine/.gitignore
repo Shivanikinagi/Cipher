@@ -1,11 +1,6 @@
-__pycache__/
-*.pyc
 .venv/
 .pytest_cache/
-*.egg-info/
-dist/
-build/
-benchmark/report.md
-benchmark/results/
 data/
-.env
+__pycache__/
+benchmark/results/
+*.egg-info/
