@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.cipher/cipher",
+  "mcpName": "io.github.cipher/cipher",
+  "description": "Dependency graph + 24 MCP tools. Impact analysis, simulation, security, agent coordination",
+  "repository": {
+    "url": "https://github.com/cipher/cipher",
+    "source": "github"
+  },
+  "version": "1.9.4",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "cipher-cli",
+      "version": "1.9.4",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

@@ -1,0 +1,135 @@
+import chokidar, { FSWatcher } from 'chokidar';
+import { join } from 'path';
+
+export interface WatcherCallbacks {
+  onFileChanged: (filePath: string) => void | Promise<void>;
+  onFileAdded: (filePath: string) => void | Promise<void>;
+  onFileDeleted: (filePath: string) => void | Promise<void>;
+}
+
+export function watchProject(projectRoot: string, callbacks: WatcherCallbacks): FSWatcher {
+  console.error(`[Watcher] Creating watcher for: ${projectRoot}`);
+  
+  // Watch the directory directly (glob patterns don't work reliably on all systems)
+  // We'll filter by extension in the callbacks
+  const watcherOptions = {
+    ignored: [
+      '**/node_modules/**',
+      '**/vendor/**',  // Go dependencies
+      '**/.git/**',
+      '**/dist/**',
+      '**/build/**',
+      '**/coverage/**',
+      '**/.next/**',
+      '**/.turbo/**',
+      '**/.DS_Store',      // macOS metadata
+      '**/.env',           // Environment files
+      '**/.env.*',         // Environment variants
+      '**/.eslintcache',   // ESLint cache
+      '**/.vscode/**',     // VS Code settings
+      '**/.idea/**',       // IntelliJ IDEA settings
+    ],
+    ignoreInitial: true,  // Don't fire events for existing files
+    persistent: true,
+    followSymlinks: false,
+    usePolling: true,  // Use polling for macOS reliability
+    interval: 1000,    // Poll every second
+    atomic: true,      // Handle atomic writes (VS Code, Sublime, etc.)
+    awaitWriteFinish: {
+      stabilityThreshold: 300,  // Wait 300ms after last change before firing
+      pollInterval: 100,
+    },
+  };
+  
+  const watcher = chokidar.watch(projectRoot, watcherOptions);
+
+  console.error('[Watcher] Attaching event listeners...');
+
+  watcher.on('change', (absolutePath: string) => {
+    // Only process TypeScript, JavaScript, Python, Go, Rust, C, and C# files
+    const validExtensions = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.go', '.rs', '.c', '.h', '.cs', '.csx', '.csproj', '.java', '.kt', '.kts', '.cpp', '.cc', '.cxx', '.c++', '.hpp', '.hh', '.hxx', '.h++', '.inl', '.ipp', '.php', '.swift', '.mojo', '.🔥', '.rb', '.rake', '.gemspec', '.dart', '.R', '.r', '.Rmd', '.rmd'];
+    if (!validExtensions.some(ext => absolutePath.endsWith(ext))) return;
+    // Also match build files by name
+    const fileName = absolutePath.split('/').pop() || '';
+    if (!validExtensions.some(ext => absolutePath.endsWith(ext)) && !['pom.xml', 'build.gradle', 'build.gradle.kts', 'settings.gradle.kts', 'settings.gradle', 'CMakeLists.txt', 'conanfile.txt', 'vcpkg.json', 'Package.swift', 'mojoproject.toml', 'Gemfile', 'pubspec.yaml', 'DESCRIPTION', 'NAMESPACE', 'renv.lock'].includes(fileName)) return;
+    
+    // Skip Go test files
+    if (absolutePath.endsWith('_test.go')) return;
+    
+    // Convert absolute path to relative path for consistency
+    const relativePath = absolutePath.replace(projectRoot + '/', '');
+    console.error(`[Watcher] Change event: ${relativePath}`);
+    callbacks.onFileChanged(relativePath);
+  });
+
+  watcher.on('add', (absolutePath: string) => {
+    // Only process supported language files
+    const validExtensions = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.go', '.rs', '.c', '.h', '.cs', '.csx', '.csproj', '.java', '.kt', '.kts', '.cpp', '.cc', '.cxx', '.c++', '.hpp', '.hh', '.hxx', '.h++', '.inl', '.ipp', '.php', '.swift', '.mojo', '.🔥', '.rb', '.rake', '.gemspec', '.dart', '.R', '.r', '.Rmd', '.rmd'];
+    const addFileName = absolutePath.split('/').pop() || '';
+    if (!validExtensions.some(ext => absolutePath.endsWith(ext)) && !['pom.xml', 'build.gradle', 'build.gradle.kts', 'settings.gradle.kts', 'settings.gradle', 'CMakeLists.txt', 'conanfile.txt', 'vcpkg.json', 'Package.swift', 'mojoproject.toml', 'Gemfile', 'pubspec.yaml', 'DESCRIPTION', 'NAMESPACE', 'renv.lock'].includes(addFileName)) return;
+    
+    // Skip Go test files
+    if (absolutePath.endsWith('_test.go')) return;
+    
+    // Convert absolute path to relative path for consistency
+    const relativePath = absolutePath.replace(projectRoot + '/', '');
+    console.error(`[Watcher] Add event: ${relativePath}`);
+    callbacks.onFileAdded(relativePath);
+  });
+
+  watcher.on('unlink', (absolutePath: string) => {
+    // Only process supported language files
+    const validExtensions = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.go', '.rs', '.c', '.h', '.cs', '.csx', '.csproj', '.java', '.kt', '.kts', '.cpp', '.cc', '.cxx', '.c++', '.hpp', '.hh', '.hxx', '.h++', '.inl', '.ipp', '.php', '.swift', '.mojo', '.🔥', '.rb', '.rake', '.gemspec', '.dart', '.R', '.r', '.Rmd', '.rmd'];
+    if (!validExtensions.some(ext => absolutePath.endsWith(ext))) return;
+    
+    // Skip Go test files
+    if (absolutePath.endsWith('_test.go')) return;
+    
+    // Convert absolute path to relative path for consistency
+    const relativePath = absolutePath.replace(projectRoot + '/', '');
+    console.error(`[Watcher] Unlink event: ${relativePath}`);
+    callbacks.onFileDeleted(relativePath);
+  });
+
+  watcher.on('error', (error: Error) => {
+    console.error('[Watcher] Error:', error);
+  });
+
+  watcher.on('ready', () => {
+    console.error('[Watcher] Ready — watching for changes');
+    // Log what we're actually watching
+    const watched = watcher.getWatched();
+    const dirs = Object.keys(watched);
+    let fileCount = 0;
+    
+    // Count supported files (excluding _test.go)
+    for (const dir of dirs) {
+      const files = watched[dir];
+      fileCount += files.filter(f => 
+        f.endsWith('.ts') || f.endsWith('.tsx') || 
+        f.endsWith('.js') || f.endsWith('.jsx') || f.endsWith('.mjs') || f.endsWith('.cjs') ||
+        f.endsWith('.py') ||
+        (f.endsWith('.go') && !f.endsWith('_test.go')) ||
+        f.endsWith('.rs') ||
+        f.endsWith('.c') || f.endsWith('.h') ||
+        f.endsWith('.cs') || f.endsWith('.csx') || f.endsWith('.csproj') ||
+        f.endsWith('.java') || f === 'pom.xml' || f === 'build.gradle' || f === 'build.gradle.kts' ||
+        f.endsWith('.kt') || f.endsWith('.kts') || f === 'settings.gradle.kts' || f === 'settings.gradle' ||
+        f.endsWith('.php') ||
+        f.endsWith('.swift') ||
+        f.endsWith('.mojo') || f.endsWith('.🔥') ||
+        f.endsWith('.rb') || f.endsWith('.rake') || f.endsWith('.gemspec') ||
+        f.endsWith('.dart') ||
+        f.endsWith('.R') || f.endsWith('.r') || f.endsWith('.Rmd') || f.endsWith('.rmd') ||
+        f.endsWith('.cpp') || f.endsWith('.cc') || f.endsWith('.cxx') || f.endsWith('.c++') ||
+        f.endsWith('.hpp') || f.endsWith('.hh') || f.endsWith('.hxx') || f.endsWith('.h++') ||
+        f.endsWith('.inl') || f.endsWith('.ipp') ||
+        f === 'CMakeLists.txt' || f === 'conanfile.txt' || f === 'vcpkg.json'
+      ).length;
+    }
+    
+    console.error(`[Watcher] Watching ${fileCount} TypeScript/JavaScript/Python/Go/Rust/C/C++/C#/Java/Kotlin/PHP/Swift/Mojo/Ruby/Dart/R files in ${dirs.length} directories`);
+  });
+
+  return watcher;
+}

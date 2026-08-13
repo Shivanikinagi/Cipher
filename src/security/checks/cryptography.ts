@@ -1,0 +1,745 @@
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import type { ParsedFile } from '../../parser/types.js';
+import type { SecurityFinding, Severity } from '../types.js';
+
+const SKIP_DIRS = ['node_modules/', 'dist/', '.git/', '.wrangler/', 'src/security/checks/'];
+
+const USER_INPUT_NAMES = /(?:input|user|name|path|query|param|request|body|args|url)/i;
+
+function shouldSkip(filePath: string): boolean {
+  return SKIP_DIRS.some(d => filePath.includes(d));
+}
+
+function isAuthOrCryptoFile(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return /(?:auth|password|crypto|hash|session|token|jwt)/.test(lower);
+}
+
+export async function checkCryptography(
+  files: ParsedFile[],
+  projectRoot: string
+): Promise<SecurityFinding[]> {
+  const findings: SecurityFinding[] = [];
+
+  try {
+    for (const file of files) {
+      if (shouldSkip(file.filePath)) continue;
+
+      let content: string;
+      try {
+        content = readFileSync(join(projectRoot, file.filePath), 'utf-8');
+      } catch {
+        continue;
+      }
+
+      const lines = content.split('\n');
+      const isCryptoFile = isAuthOrCryptoFile(file.filePath);
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+
+        if (line.trimStart().startsWith('//') || line.trimStart().startsWith('#')) continue;
+
+        // Weak hash algorithms
+        if (/createHash\s*\(\s*['"]md5['"]\s*\)/.test(line) || /hashlib\.md5\s*\(/.test(line) || /MessageDigest\.getInstance\s*\(\s*["']MD5["']\s*\)/.test(line)) {
+          findings.push({
+            id: '',
+            severity: isCryptoFile ? 'high' : 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Weak hash algorithm: MD5',
+            description: 'MD5 is cryptographically broken — collisions can be generated in seconds.',
+            attackScenario: 'An attacker could generate MD5 collisions to bypass integrity checks or forge password hashes.',
+            suggestedFix: 'Use SHA-256 or SHA-3 for integrity checks. Use bcrypt, scrypt, or argon2 for password hashing.',
+          });
+        }
+
+        if (/createHash\s*\(\s*['"]sha1['"]\s*\)/.test(line) || /hashlib\.sha1\s*\(/.test(line) || /MessageDigest\.getInstance\s*\(\s*["']SHA-?1["']\s*\)/.test(line)) {
+          findings.push({
+            id: '',
+            severity: isCryptoFile ? 'high' : 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Weak hash algorithm: SHA-1',
+            description: 'SHA-1 has known collision attacks (SHAttered) — should not be used for security purposes.',
+            attackScenario: 'An attacker could generate SHA-1 collisions to bypass integrity checks.',
+            suggestedFix: 'Use SHA-256 or SHA-3 for integrity checks. Use bcrypt, scrypt, or argon2 for password hashing.',
+          });
+        }
+
+        // Java weak cipher: DES
+        if (/Cipher\.getInstance\s*\(\s*["']DES/.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Weak cipher algorithm: DES',
+            description: 'DES uses a 56-bit key and can be brute-forced in hours.',
+            attackScenario: 'An attacker could brute-force DES-encrypted data to reveal plaintext.',
+            suggestedFix: 'Use AES-256 with GCM mode: Cipher.getInstance("AES/GCM/NoPadding")',
+          });
+        }
+
+        // Java log injection
+        if (/(?:log|logger|LOG)\s*\.\s*(?:info|debug|warn|error|trace)\s*\([^)]*\+/.test(line)) {
+          if (USER_INPUT_NAMES.test(line)) {
+            findings.push({
+              id: '',
+              severity: 'medium',
+              vulnerabilityClass: 'cryptography',
+              file: file.filePath,
+              line: i + 1,
+              title: 'Potential log injection',
+              description: 'User-controlled input concatenated directly into log output.',
+              attackScenario: 'An attacker could inject newlines or control characters to forge log entries or hide malicious activity.',
+              suggestedFix: 'Use parameterized logging: log.info("User: {}", userInput) instead of string concatenation.',
+            });
+          }
+        }
+
+        // Math.random in crypto-related files
+        if (/Math\.random\(\)/.test(line) && isCryptoFile) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Math.random() in cryptography-related file',
+            description: 'Math.random() is not cryptographically secure — its output can be predicted.',
+            attackScenario: 'An attacker could predict Math.random() values to forge tokens, nonces, or other security-critical random values.',
+            suggestedFix: 'Use crypto.randomBytes() or crypto.getRandomValues() for cryptographic purposes.',
+          });
+        }
+
+        // Missing HTTPS (not localhost or 127.)
+        if (/(?:fetch|axios\.(?:get|post|put|delete|patch)|http\.request)\s*\(\s*['"]http:\/\/(?!(?:localhost|127\.))/i.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'HTTP used instead of HTTPS',
+            description: 'An HTTP (not HTTPS) URL is used for an external request — data is transmitted unencrypted.',
+            attackScenario: 'An attacker on the network path could intercept, read, or modify data in transit (man-in-the-middle).',
+            suggestedFix: 'Use HTTPS for all external requests to ensure data confidentiality and integrity.',
+          });
+        }
+
+        // Hardcoded salt in pbkdf2
+        if (/pbkdf2/.test(line) && /['"][a-zA-Z0-9+/=]{8,}['"]/.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Hardcoded salt in key derivation',
+            description: 'A hardcoded salt is used with PBKDF2 — all users share the same salt.',
+            attackScenario: 'An attacker could precompute rainbow tables with the known salt to crack all passwords at once.',
+            suggestedFix: 'Generate a unique random salt per user using crypto.randomBytes(16).',
+          });
+        }
+
+        // C++ weak random: rand() for security-sensitive operations
+        if (/\brand\s*\(\s*\)/.test(line) && isCryptoFile) {
+          findings.push({
+            id: '',
+            severity: 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Weak random: rand() in security context',
+            description: 'rand() is not cryptographically secure — its output can be predicted.',
+            attackScenario: 'An attacker could predict rand() values to forge tokens or bypass security checks.',
+            suggestedFix: 'Use std::random_device or platform-specific CSPRNG (e.g., /dev/urandom, BCryptGenRandom).',
+          });
+        }
+
+        // C++ hardcoded credentials
+        if (/(?:const\s+(?:char|std::string)\s*\*?\s*(?:password|secret|api_key|apiKey|token)\s*=\s*["'])/i.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Hardcoded credentials in C++ source',
+            description: 'A password, secret, or API key is hardcoded as a string literal.',
+            attackScenario: 'An attacker with access to the binary or source could extract the credential.',
+            suggestedFix: 'Load credentials from environment variables or a secure vault at runtime.',
+          });
+        }
+
+        // Kotlin hardcoded credentials
+        if (/(?:val|var)\s+(?:password|secret|apiKey|api_key|token)\s*=\s*["']/i.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Hardcoded credentials in Kotlin source',
+            description: 'A password, secret, or API key is hardcoded as a string literal.',
+            attackScenario: 'An attacker with access to the binary or source could extract the credential.',
+            suggestedFix: 'Load credentials from environment variables or a secure vault at runtime.',
+          });
+        }
+
+        // Kotlin insecure random
+        if (/\bRandom\s*\(\s*\)/.test(line) && isCryptoFile) {
+          findings.push({
+            id: '',
+            severity: 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Insecure random in Kotlin security context',
+            description: 'kotlin.random.Random() is not cryptographically secure — its output can be predicted.',
+            attackScenario: 'An attacker could predict random values to forge tokens or bypass security checks.',
+            suggestedFix: 'Use java.security.SecureRandom for cryptographic purposes.',
+          });
+        }
+
+        // Kotlin not-null assertion abuse near security code
+        if (/!!\s*\./.test(line) && isCryptoFile) {
+          findings.push({
+            id: '',
+            severity: 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Not-null assertion (!!) in security-sensitive Kotlin code',
+            description: 'The !! operator can throw NullPointerException, potentially bypassing security checks.',
+            attackScenario: 'An attacker could trigger a null value to cause an exception that bypasses validation logic.',
+            suggestedFix: 'Use safe calls (?.) with proper null handling instead of !! assertions.',
+          });
+        }
+
+        // Kotlin hardcoded HTTP URL
+        if (/(?:val|var)\s+\w*[Uu]rl\w*\s*=\s*["']http:\/\/(?!(?:localhost|127\.))/.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Hardcoded HTTP URL in Kotlin source',
+            description: 'An HTTP (not HTTPS) URL is hardcoded — data is transmitted unencrypted.',
+            attackScenario: 'An attacker on the network path could intercept, read, or modify data in transit.',
+            suggestedFix: 'Use HTTPS for all external URLs to ensure data confidentiality and integrity.',
+          });
+        }
+
+        // PHP weak crypto patterns
+        if (/\bmd5\s*\(/.test(line) && /password|passwd|pass|pwd/i.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'PHP md5() used for password hashing',
+            description: 'md5() is cryptographically broken and should never be used for password hashing.',
+            attackScenario: 'An attacker could crack MD5 password hashes in seconds using rainbow tables or GPU brute force.',
+            suggestedFix: 'Use password_hash() with PASSWORD_BCRYPT or PASSWORD_ARGON2ID.',
+          });
+        }
+
+        if (/\bsha1\s*\(/.test(line) && /password|passwd|pass|pwd/i.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'PHP sha1() used for password hashing',
+            description: 'SHA-1 has known collision attacks and should not be used for password hashing.',
+            attackScenario: 'An attacker could crack SHA-1 password hashes using precomputed tables.',
+            suggestedFix: 'Use password_hash() with PASSWORD_BCRYPT or PASSWORD_ARGON2ID.',
+          });
+        }
+
+        if (/\bcrypt\s*\(\s*[^,]+,\s*['"][\$]?[12a-zA-Z]{0,3}['"]/.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'PHP crypt() with potentially weak salt',
+            description: 'crypt() with a short or weak salt may use DES or MD5 algorithm.',
+            attackScenario: 'An attacker could crack weakly-salted crypt() hashes using brute force.',
+            suggestedFix: 'Use password_hash() instead of crypt(). It automatically uses a strong algorithm and salt.',
+          });
+        }
+
+        if (/\bmcrypt_/.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'PHP deprecated mcrypt_* function',
+            description: 'mcrypt extension was deprecated in PHP 7.1 and removed in PHP 7.2. It has known vulnerabilities.',
+            attackScenario: 'An attacker could exploit known weaknesses in mcrypt implementations.',
+            suggestedFix: 'Use openssl_encrypt()/openssl_decrypt() or the sodium extension (sodium_crypto_*).',
+          });
+        }
+
+        if (/\b(?:rand|mt_rand)\s*\(/.test(line) && isCryptoFile) {
+          findings.push({
+            id: '',
+            severity: 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'PHP rand()/mt_rand() in security context',
+            description: 'rand() and mt_rand() are not cryptographically secure — their output can be predicted.',
+            attackScenario: 'An attacker could predict random values to forge tokens or bypass security checks.',
+            suggestedFix: 'Use random_bytes() or random_int() for cryptographic purposes.',
+          });
+        }
+
+        // PHP hardcoded credentials
+        if (/\$(?:password|secret|api_?key|token)\s*=\s*['"][^'"]{4,}['"]/i.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Hardcoded credentials in PHP source',
+            description: 'A password, secret, or API key is hardcoded as a string literal.',
+            attackScenario: 'An attacker with access to the source could extract the credential.',
+            suggestedFix: 'Load credentials from environment variables using getenv() or $_ENV.',
+          });
+        }
+
+        // Swift weak crypto patterns
+        // MD5/SHA1 via CommonCrypto or CryptoKit legacy
+        if (/\bCC_MD5\b/.test(line) || /Insecure\s*\.\s*MD5/.test(line)) {
+          findings.push({
+            id: '',
+            severity: isCryptoFile ? 'high' : 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Weak hash algorithm: MD5 in Swift',
+            description: 'MD5 is cryptographically broken — collisions can be generated in seconds.',
+            attackScenario: 'An attacker could generate MD5 collisions to bypass integrity checks or forge hashes.',
+            suggestedFix: 'Use SHA256 from CryptoKit: SHA256.hash(data: data)',
+          });
+        }
+
+        if (/\bCC_SHA1\b/.test(line) || /Insecure\s*\.\s*SHA1/.test(line)) {
+          findings.push({
+            id: '',
+            severity: isCryptoFile ? 'high' : 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Weak hash algorithm: SHA-1 in Swift',
+            description: 'SHA-1 has known collision attacks — should not be used for security purposes.',
+            attackScenario: 'An attacker could generate SHA-1 collisions to bypass integrity checks.',
+            suggestedFix: 'Use SHA256 from CryptoKit: SHA256.hash(data: data)',
+          });
+        }
+
+        // Swift hardcoded credentials
+        if (/(?:let|var)\s+(?:password|secret|apiKey|api_key|token)\s*(?::\s*String\s*)?=\s*["']/i.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Hardcoded credentials in Swift source',
+            description: 'A password, secret, or API key is hardcoded as a string literal.',
+            attackScenario: 'An attacker with access to the binary or source could extract the credential.',
+            suggestedFix: 'Load credentials from Keychain, environment variables, or a secure configuration service.',
+          });
+        }
+
+        // Swift insecure random (arc4random is okay, but not for crypto)
+        if (/\barc4random\b/.test(line) && isCryptoFile) {
+          findings.push({
+            id: '',
+            severity: 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'arc4random in Swift security context',
+            description: 'arc4random is not suitable for cryptographic key generation.',
+            attackScenario: 'An attacker could predict random values if used for cryptographic purposes.',
+            suggestedFix: 'Use SecRandomCopyBytes or SystemRandomNumberGenerator for security-sensitive randomness.',
+          });
+        }
+
+        // Swift HTTP (non-HTTPS) allowsInsecureHTTPLoads or hardcoded http:// URLs
+        if (/allowsArbitraryLoads\s*:\s*true/.test(line) || /NSAllowsArbitraryLoads.*true/.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Swift App Transport Security disabled',
+            description: 'allowsArbitraryLoads is set to true — all HTTP traffic is permitted without encryption.',
+            attackScenario: 'An attacker on the network path could intercept, read, or modify data in transit.',
+            suggestedFix: 'Remove allowsArbitraryLoads or set to false. Add specific exceptions only for domains that require HTTP.',
+          });
+        }
+
+        if (/(?:let|var)\s+\w*[Uu]rl\w*\s*=\s*["']http:\/\/(?!(?:localhost|127\.))/.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Hardcoded HTTP URL in Swift source',
+            description: 'An HTTP (not HTTPS) URL is hardcoded — data is transmitted unencrypted.',
+            attackScenario: 'An attacker on the network path could intercept, read, or modify data in transit.',
+            suggestedFix: 'Use HTTPS for all external URLs to ensure data confidentiality and integrity.',
+          });
+        }
+
+        // Mojo crypto patterns
+        // Weak random via Python interop
+        if (/from\s+python\s+import\s+random/.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Mojo weak random via Python random module',
+            description: 'Python random module imported via Mojo interop — not cryptographically secure.',
+            attackScenario: 'An attacker could predict random values to forge tokens or bypass security checks.',
+            suggestedFix: 'Use Python secrets module through interop, or implement CSPRNG natively in Mojo.',
+          });
+        }
+
+        // Hardcoded keys in alias declarations
+        if (/\balias\s+(?:key|secret|password|token|api_key)\s*[=:]\s*["'][^"']{4,}["']/i.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Hardcoded credentials in Mojo alias declaration',
+            description: 'A secret, key, or password is hardcoded in a compile-time alias — visible in source.',
+            attackScenario: 'An attacker with access to source or compiled binary could extract the credential.',
+            suggestedFix: 'Load credentials from environment variables at runtime instead of alias declarations.',
+          });
+        }
+
+        // Insecure hash via Python hashlib interop
+        if (/from\s+python\s+import\s+hashlib/.test(line)) {
+          if (isCryptoFile) {
+            findings.push({
+              id: '',
+              severity: 'medium',
+              vulnerabilityClass: 'cryptography',
+              file: file.filePath,
+              line: i + 1,
+              title: 'Mojo Python hashlib imported in security context',
+              description: 'Python hashlib imported via interop — ensure only strong algorithms (SHA-256+) are used.',
+              attackScenario: 'If MD5 or SHA-1 from hashlib is used, an attacker could exploit weak hash collisions.',
+              suggestedFix: 'Only use hashlib.sha256() or stronger. Avoid md5() and sha1() for security purposes.',
+            });
+          }
+        }
+
+        // Ruby weak crypto patterns
+        // Digest::MD5
+        if (/Digest::MD5/.test(line)) {
+          findings.push({
+            id: '',
+            severity: isCryptoFile ? 'high' : 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Weak hash algorithm: MD5 in Ruby',
+            description: 'MD5 is cryptographically broken — collisions can be generated in seconds.',
+            attackScenario: 'An attacker could generate MD5 collisions to bypass integrity checks or forge hashes.',
+            suggestedFix: 'Use Digest::SHA256 or bcrypt for password hashing.',
+          });
+        }
+
+        // Digest::SHA1
+        if (/Digest::SHA1/.test(line)) {
+          findings.push({
+            id: '',
+            severity: isCryptoFile ? 'high' : 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Weak hash algorithm: SHA-1 in Ruby',
+            description: 'SHA-1 has known collision attacks — should not be used for security purposes.',
+            attackScenario: 'An attacker could generate SHA-1 collisions to bypass integrity checks.',
+            suggestedFix: 'Use Digest::SHA256 or stronger for integrity checks.',
+          });
+        }
+
+        // Ruby weak random: rand() in security contexts
+        if (/\brand\s*\(/.test(line) && isCryptoFile) {
+          findings.push({
+            id: '',
+            severity: 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Weak random: rand() in Ruby security context',
+            description: 'rand() is not cryptographically secure — its output can be predicted.',
+            attackScenario: 'An attacker could predict rand() values to forge tokens or bypass security checks.',
+            suggestedFix: 'Use SecureRandom.hex, SecureRandom.uuid, or SecureRandom.random_bytes for cryptographic purposes.',
+          });
+        }
+
+        // Ruby hardcoded credentials
+        if (/(?:password|secret|api_key|token)\s*=\s*['"][^'"]{4,}['"]/i.test(line)) {
+          if (file.filePath.endsWith('.rb')) {
+            findings.push({
+              id: '',
+              severity: 'high',
+              vulnerabilityClass: 'cryptography',
+              file: file.filePath,
+              line: i + 1,
+              title: 'Hardcoded credentials in Ruby source',
+              description: 'A password, secret, or API key is hardcoded as a string literal.',
+              attackScenario: 'An attacker with access to the source could extract the credential.',
+              suggestedFix: 'Load credentials from environment variables using ENV["KEY"] or Rails credentials.',
+            });
+          }
+        }
+
+        // Ruby SSL verification disabled
+        if (/verify_mode\s*=\s*OpenSSL::SSL::VERIFY_NONE/.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Ruby SSL verification disabled',
+            description: 'SSL certificate verification is disabled — connections are not authenticated.',
+            attackScenario: 'An attacker on the network could intercept and modify traffic without detection.',
+            suggestedFix: 'Use OpenSSL::SSL::VERIFY_PEER to verify server certificates.',
+          });
+        }
+
+        // Ruby weak cipher (DES/RC4 via OpenSSL::Cipher)
+        if (/OpenSSL::Cipher\s*\.\s*new\s*\(\s*['"](?:DES|RC4)/i.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Weak cipher algorithm in Ruby',
+            description: 'DES/RC4 ciphers are cryptographically weak and can be broken with modern hardware.',
+            attackScenario: 'An attacker could brute-force or exploit weaknesses in DES/RC4 to decrypt data.',
+            suggestedFix: 'Use OpenSSL::Cipher.new("aes-256-gcm") for authenticated encryption.',
+          });
+        }
+
+        // ─── Dart/Flutter cryptography patterns ───────────────────
+
+        // Dart: MD5/SHA1 for credential hashing
+        if (file.filePath.endsWith('.dart') && /(?:md5|sha1)\s*\.convert/.test(line) && /password|passwd|credential|secret/i.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Weak hash algorithm for credentials in Dart',
+            description: 'MD5/SHA1 should not be used for credential hashing — fast hashes are easily brute-forced.',
+            attackScenario: 'An attacker could crack hashed credentials using precomputed tables or GPU acceleration.',
+            suggestedFix: 'Use bcrypt, argon2, or scrypt via pointycastle or cryptography packages.',
+          });
+        }
+
+        // Dart: Insecure Random usage
+        if (file.filePath.endsWith('.dart') && /\bRandom\s*\(\s*\)/.test(line) && isCryptoFile) {
+          findings.push({
+            id: '',
+            severity: 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Insecure random number generator in Dart',
+            description: 'Random() is not cryptographically secure — its output can be predicted.',
+            attackScenario: 'An attacker could predict Random() values to forge tokens or session identifiers.',
+            suggestedFix: 'Use Random.secure() for cryptographic randomness.',
+          });
+        }
+
+        // Dart: Hardcoded credentials
+        if (file.filePath.endsWith('.dart') && /(?:password|secret|apiKey|token)\s*=\s*['"][^'"]{4,}['"]/i.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Hardcoded credentials in Dart source',
+            description: 'A sensitive value is hardcoded as a string literal in source code.',
+            attackScenario: 'An attacker with access to the source or compiled binary could extract the credential.',
+            suggestedFix: 'Load credentials from environment variables or a secure configuration service.',
+          });
+        }
+
+        // Dart: SSL pinning disabled (badCertificateCallback returning true)
+        if (file.filePath.endsWith('.dart') && /badCertificateCallback.*(?:=>|return)\s*true/.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Dart SSL certificate validation disabled',
+            description: 'badCertificateCallback always returns true — server certificates are not validated.',
+            attackScenario: 'An attacker on the network could intercept and modify encrypted traffic.',
+            suggestedFix: 'Implement proper certificate pinning or remove the badCertificateCallback override.',
+          });
+        }
+
+        // Dart: HTTP instead of HTTPS
+        if (file.filePath.endsWith('.dart') && /['"]http:\/\/(?!localhost|127\.0\.0\.1|10\.)/.test(line) && !line.includes('// cipher-security-reviewed')) {
+          findings.push({
+            id: '',
+            severity: 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Insecure HTTP connection in Dart',
+            description: 'HTTP used instead of HTTPS for non-local connection — traffic is unencrypted.',
+            attackScenario: 'An attacker on the network could read or modify data in transit.',
+            suggestedFix: 'Use HTTPS for all non-local connections.',
+          });
+        }
+
+        // Dart: Sensitive data in SharedPreferences (unencrypted)
+        if (file.filePath.endsWith('.dart') && /SharedPreferences/.test(line) && /(?:token|password|secret|key|auth)/i.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Sensitive data in unencrypted Dart local storage',
+            description: 'Sensitive values stored in SharedPreferences without encryption.',
+            attackScenario: 'Device backup extraction or root access could expose stored sensitive values.',
+            suggestedFix: 'Use flutter_secure_storage for sensitive data that needs local persistence.',
+          });
+        }
+
+        // R: Weak hashing for credential handling
+        const isRFile = file.filePath.endsWith('.R') || file.filePath.endsWith('.r') || file.filePath.endsWith('.Rmd') || file.filePath.endsWith('.rmd');
+        if (isRFile && /digest\s*\(.*algo\s*=\s*['"](?:md5|sha1)['"]/.test(line) && /(?:password|credential|token|secret|auth)/i.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Weak hash algorithm for credential handling in R',
+            description: 'MD5 or SHA-1 used for credential-related hashing — these are considered weak.',
+            attackScenario: 'An attacker could compute hash collisions or reverse hashes using precomputed tables.',
+            suggestedFix: 'Use digest(..., algo="sha256") or bcrypt/argon2 via the sodium package for credentials.',
+          });
+        }
+
+        // R: Non-cryptographic random number generation for security purposes
+        if (isRFile && /(?:runif|sample|rnorm)\s*\(/.test(line) && /(?:token|key|secret|password|session|nonce|salt)/i.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Non-cryptographic RNG used for security value in R',
+            description: 'runif()/sample() are not cryptographically secure — output can be predicted.',
+            attackScenario: 'An attacker could predict the generated values to forge tokens or identifiers.',
+            suggestedFix: 'Use openssl::rand_bytes() or sodium::random() for cryptographically secure random values.',
+          });
+        }
+
+        // R: Hardcoded credentials
+        if (isRFile && /(?:password|secret|api_key|token|auth_token)\s*(?:<-|=)\s*['"][^'"]{4,}['"]/i.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Hardcoded credentials in R source',
+            description: 'A sensitive value is hardcoded as a string literal in source code.',
+            attackScenario: 'An attacker with access to the source could extract the credential.',
+            suggestedFix: 'Load credentials from environment variables via Sys.getenv() or a .Renviron file.',
+          });
+        }
+
+        // R: SSL verification disabled
+        if (isRFile && /(?:ssl_verifypeer\s*=\s*(?:FALSE|0)|ssl\.verifypeer\s*=\s*(?:FALSE|0)|verify\s*=\s*FALSE)/.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'high',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'SSL verification disabled in R',
+            description: 'SSL peer verification is disabled — server certificates are not validated.',
+            attackScenario: 'An attacker on the network could intercept and modify encrypted traffic.',
+            suggestedFix: 'Remove ssl_verifypeer=FALSE. Ensure proper SSL certificates are configured.',
+          });
+        }
+
+        // R: Insecure HTTP connections
+        if (isRFile && /['"]http:\/\/(?!localhost|127\.0\.0\.1|10\.)/.test(line) && !line.includes('# cipher-security-reviewed')) {
+          findings.push({
+            id: '',
+            severity: 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Insecure HTTP connection in R',
+            description: 'HTTP used instead of HTTPS for non-local connection — traffic is unencrypted.',
+            attackScenario: 'An attacker on the network could read or modify data in transit.',
+            suggestedFix: 'Use HTTPS for all non-local connections.',
+          });
+        }
+
+        // R: Sensitive data in plain RDS files
+        if (isRFile && /saveRDS\s*\(/.test(line) && /(?:password|secret|token|key|credential|auth)/i.test(line)) {
+          findings.push({
+            id: '',
+            severity: 'medium',
+            vulnerabilityClass: 'cryptography',
+            file: file.filePath,
+            line: i + 1,
+            title: 'Sensitive data stored in unencrypted RDS file',
+            description: 'Sensitive values saved to a plain RDS file without encryption.',
+            attackScenario: 'Anyone with file access could read the deserialized sensitive data.',
+            suggestedFix: 'Use the cyphr or sodium package to encrypt sensitive data before saving.',
+          });
+        }
+      }
+    }
+  } catch {
+    // Don't crash the entire scan
+  }
+
+  return findings;
+}
